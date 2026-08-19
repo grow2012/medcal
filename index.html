@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta name="theme-color" content="#4a7dff" />
 <title>用药日历 · 生长激素 / 抑制剂（电脑版）</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   :root {
     --bg: #eef1f8;
@@ -302,6 +303,7 @@
     </div>
   </div>
   <div class="todaychip" id="todayChip"></div>
+  <div class="todaychip" id="syncChip" style="margin-left:10px;">☁️ 连接中…</div>
 </div>
 
 <div class="layout">
@@ -470,6 +472,76 @@
   var LOG_KEY = "medcal_log_v1";
   var MEAS_KEY = "medcal_meas_v1";
 
+  // ---------- 云端（Supabase）配置 ----------
+  var SUPABASE_URL = "https://inlapjpcpqeyshjuwagc.supabase.co";
+  var SUPABASE_KEY = "sb_publishable_RrNIxqcdkAluK8NN8KY5dQ_VC455WBk";
+  var CLOUD_TABLE = "medcal_data";
+  var CLOUD_ROW_ID = 1;        // 共享同一份数据，固定用 id=1 这一行
+  var sb = null;               // supabase 客户端
+  var cloudReady = false;      // 云端是否可用
+  var syncTimer = null;        // 防抖上传计时器
+
+  function initCloud() {
+    try {
+      if (window.supabase && SUPABASE_URL.indexOf("http") === 0) {
+        sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  function setSyncChip(state) {
+    var el = document.getElementById("syncChip");
+    if (!el) return;
+    var map = {
+      connecting: "☁️ 连接中…",
+      loading: "☁️ 正在读取云端…",
+      synced: "☁️ 已同步",
+      saving: "⏳ 同步中…",
+      offline: "⚠️ 离线（仅本机）",
+      error: "⚠️ 云端异常（仅本机）"
+    };
+    el.textContent = map[state] || state;
+    el.style.color = (state === "offline" || state === "error") ? "#c94f5c"
+                    : (state === "synced" ? "var(--done)" : "var(--muted)");
+  }
+
+  // 从云端拉取一次；成功则用云端数据覆盖本地
+  function cloudPull(cb) {
+    if (!sb) { cb && cb(false); return; }
+    setSyncChip("loading");
+    sb.from(CLOUD_TABLE).select("cfg,log,meas").eq("id", CLOUD_ROW_ID).single()
+      .then(function (res) {
+        if (res.error) { setSyncChip("error"); cb && cb(false); return; }
+        var d = res.data || {};
+        if (d.cfg && typeof d.cfg === "object") { cfg = Object.assign({}, DEFAULTS, d.cfg); localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); }
+        if (d.log && typeof d.log === "object") { log = d.log; localStorage.setItem(LOG_KEY, JSON.stringify(log)); }
+        if (d.meas && typeof d.meas === "object") { meas = d.meas; localStorage.setItem(MEAS_KEY, JSON.stringify(meas)); }
+        cloudReady = true;
+        setSyncChip("synced");
+        cb && cb(true);
+      })
+      .catch(function () { setSyncChip("error"); cb && cb(false); });
+  }
+
+  // 把本地数据推到云端（防抖，避免频繁写）
+  function cloudPush() {
+    if (!sb) { setSyncChip("offline"); return; }
+    setSyncChip("saving");
+    if (syncTimer) clearTimeout(syncTimer);
+    syncTimer = setTimeout(function () {
+      sb.from(CLOUD_TABLE).update({
+        cfg: cfg, log: log, meas: meas, updated_at: new Date().toISOString()
+      }).eq("id", CLOUD_ROW_ID)
+        .then(function (res) {
+          if (res.error) { setSyncChip("error"); }
+          else { cloudReady = true; setSyncChip("synced"); }
+        })
+        .catch(function () { setSyncChip("error"); });
+    }, 600);
+  }
+
   function loadCfg() {
     try {
       var c = JSON.parse(localStorage.getItem(CFG_KEY));
@@ -477,11 +549,11 @@
     } catch (e) {}
     return Object.assign({}, DEFAULTS);
   }
-  function saveCfg(c) { localStorage.setItem(CFG_KEY, JSON.stringify(c)); }
+  function saveCfg(c) { localStorage.setItem(CFG_KEY, JSON.stringify(c)); cloudPush(); }
   function loadLog() { try { return JSON.parse(localStorage.getItem(LOG_KEY)) || {}; } catch (e) { return {}; } }
-  function saveLog(l) { localStorage.setItem(LOG_KEY, JSON.stringify(l)); }
+  function saveLog(l) { localStorage.setItem(LOG_KEY, JSON.stringify(l)); cloudPush(); }
   function loadMeas() { try { return JSON.parse(localStorage.getItem(MEAS_KEY)) || {}; } catch (e) { return {}; } }
-  function saveMeas(m) { localStorage.setItem(MEAS_KEY, JSON.stringify(m)); }
+  function saveMeas(m) { localStorage.setItem(MEAS_KEY, JSON.stringify(m)); cloudPush(); }
 
   var cfg = loadCfg();
   var log = loadLog();
@@ -1063,6 +1135,22 @@
     fillSettings();
     bindSettings();
     refreshAll();
+
+    // ---------- 云端初始化：连接 → 拉取 → 用云端数据刷新界面 ----------
+    setSyncChip("connecting");
+    if (initCloud()) {
+      cloudPull(function (ok) {
+        if (ok) { fillSettings(); refreshAll(); }
+      });
+      // 页面重新获得焦点时，自动再拉一次，保证看到别人最新的改动
+      document.addEventListener("visibilitychange", function () {
+        if (!document.hidden && sb) {
+          cloudPull(function (ok) { if (ok) { fillSettings(); refreshAll(); } });
+        }
+      });
+    } else {
+      setSyncChip("offline");
+    }
   }
 
   init();
