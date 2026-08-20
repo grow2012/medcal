@@ -137,6 +137,8 @@
   .cell .tag.gh { background: var(--gh-soft); color: var(--gh-dark); }
   .cell .tag.inh { background: var(--inh-soft); color: var(--inh-dark); }
   .cell .tag.done { background: var(--done-soft); color: var(--done); }
+  /* 补打：非规定日的实际打针，用虚线边框 + 浅底区分 */
+  .cell .tag.extra { background: #fff; border: 1.5px dashed var(--done); color: var(--done); }
   .cell .tag .ck { font-weight: 800; }
   .cell .meas-mark {
     position: absolute; top: 8px; right: 8px; font-size: 12px;
@@ -195,6 +197,23 @@
   .seg button.active { background: #fff; color: var(--text); box-shadow: 0 1px 4px rgba(0,0,0,.1); }
   #chartCanvas { width: 100%; display: block; }
   .chart-empty { color: var(--muted); font-size: 13px; text-align: center; padding: 40px 0; }
+  /* 生长速度面板 */
+  .growth-rate { margin-top: 16px; }
+  .growth-rate .gr-title { font-size: 12px; color: var(--muted); font-weight: 600; margin-bottom: 8px; }
+  .growth-rate .gr-row { display: flex; gap: 12px; }
+  .growth-rate .gr-box {
+    flex: 1; border-radius: 12px; padding: 12px 14px;
+    background: linear-gradient(135deg, #eef7fb, #f5fbff);
+  }
+  .growth-rate .gr-box.mon { background: linear-gradient(135deg, #eaf0ff, #f4f7ff); }
+  .growth-rate .gr-box.yr  { background: linear-gradient(135deg, #e4f8ee, #f2fdf8); }
+  .growth-rate .gr-label { font-size: 12px; color: var(--muted); font-weight: 600; }
+  .growth-rate .gr-val { font-size: 22px; font-weight: 800; margin-top: 4px; color: var(--text); }
+  .growth-rate .gr-val small { font-size: 13px; font-weight: 500; color: var(--muted); }
+  .growth-rate .gr-sub { font-size: 11px; color: var(--muted); margin-top: 5px; line-height: 1.4; }
+  .growth-rate .gr-recent { font-size: 12px; color: var(--muted); margin-top: 10px; line-height: 1.5; }
+  .growth-rate .gr-recent b { color: var(--text); font-weight: 700; }
+  .growth-rate .gr-empty { font-size: 12px; color: var(--muted); padding: 6px 0; }
 
   /* ---------- 设置 ---------- */
   .settings summary {
@@ -326,6 +345,7 @@
         <span><i class="dot gh"></i> 生长激素</span>
         <span><i class="dot inh"></i> 抑制剂</span>
         <span><b style="color:var(--done)">✓</b> 已打卡</span>
+        <span><b style="color:var(--done);border:1.5px dashed var(--done);border-radius:5px;padding:0 4px;">补</b> 非规定日的实际打针</span>
         <span>📏 已记录身高/体重</span>
         <span style="margin-left:auto;color:#b7bcc9;">提示：点任意日期打卡 · ← → 键翻月</span>
       </div>
@@ -370,6 +390,7 @@
       </div>
       <canvas id="chartCanvas" height="240"></canvas>
       <div class="chart-empty" id="chartEmpty" style="display:none;">还没有记录，点日历里的某一天填写身高/体重</div>
+      <div id="growthRate" class="growth-rate"></div>
     </div>
 
     <!-- 设置 -->
@@ -516,7 +537,7 @@
         if (res.error) { setSyncChip("error"); cb && cb(false); return; }
         var d = res.data || {};
         if (d.cfg && typeof d.cfg === "object") { cfg = Object.assign({}, DEFAULTS, d.cfg); localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); }
-        if (d.log && typeof d.log === "object") { log = d.log; localStorage.setItem(LOG_KEY, JSON.stringify(log)); }
+        if (d.log && typeof d.log === "object") { log = d.log; invalidateInhCache(); localStorage.setItem(LOG_KEY, JSON.stringify(log)); }
         if (d.meas && typeof d.meas === "object") { meas = d.meas; localStorage.setItem(MEAS_KEY, JSON.stringify(meas)); }
         cloudReady = true;
         setSyncChip("synced");
@@ -571,8 +592,43 @@
 
   // ---------- 用药判断 ----------
   function isGhDay(d) { return d.getDay() === cfg.ghWeekday; }
+
+  // 抑制剂：以「最近一次实际打针」为动态锚点。
+  // 逻辑：找出 <= 目标日的最近一次抑制剂打针记录：
+  //  - 有：以该打针日为锚点，按间隔推算（实际打针会重置排期，原推算日被跳过）；
+  //  - 无：回退到设置里的「起始日 + 间隔」原推算。
+  //
+  // 缓存所有抑制剂打针日（升序），log 变化时清空重建。
+  var _inhShotCache = null;
+  function inhShotDates() {
+    if (_inhShotCache) return _inhShotCache;
+    var arr = [];
+    for (var k in log) {
+      if (log[k] && k.slice(-4) === "_inh") {
+        arr.push(k.slice(0, -4)); // 取出 yyyy-mm-dd
+      }
+    }
+    arr.sort();
+    _inhShotCache = arr;
+    return arr;
+  }
+  function invalidateInhCache() { _inhShotCache = null; }
+
+  // 返回 <= d 的最近一次抑制剂打针的 Date（无则 null）
+  function lastInhShotOnOrBefore(d) {
+    var target = ymd(d);
+    var shots = inhShotDates();
+    var found = null;
+    for (var i = 0; i < shots.length; i++) {
+      if (shots[i] <= target) found = shots[i]; else break;
+    }
+    return found ? parseYmd(found) : null;
+  }
+
   function isInhDay(d) {
-    var anchor = parseYmd(cfg.inhAnchor);
+    // 动态锚点：优先用最近一次实际打针，否则用设置起始日
+    var last = lastInhShotOnOrBefore(d);
+    var anchor = last || parseYmd(cfg.inhAnchor);
     var diff = dayDiff(anchor, d);
     if (diff < 0) return false;
     return diff % cfg.inhInterval === 0;
@@ -582,6 +638,7 @@
   function setDone(d, type, val) {
     var k = logKey(d, type);
     if (val) log[k] = true; else delete log[k];
+    if (type === "inh") invalidateInhCache();
     saveLog(log);
   }
 
@@ -623,8 +680,10 @@
     return null;
   }
   function nextInhDay(from) {
-    var anchor = parseYmd(cfg.inhAnchor);
     var f = atMidnight(from);
+    // 动态锚点：最近一次实际打针优先，否则用设置起始日
+    var last = lastInhShotOnOrBefore(f);
+    var anchor = last || parseYmd(cfg.inhAnchor);
     if (f <= anchor) return anchor;
     var diff = dayDiff(anchor, f);
     var rem = diff % cfg.inhInterval;
@@ -715,16 +774,23 @@
       cell.appendChild(mm);
     }
 
-    if (gh || inh) {
+    var extraGh = !gh && isDone(date, "gh");
+    var extraInh = !inh && isDone(date, "inh");
+
+    if (gh || inh || extraGh || extraInh) {
       var tags = document.createElement("div");
       tags.className = "tags";
       if (gh) {
         var doneGh = isDone(date, "gh");
         tags.appendChild(mkTag(doneGh ? "done" : "gh", (doneGh ? "✓ " : "") + "生长激素", doneGh));
+      } else if (extraGh) {
+        tags.appendChild(mkTag("extra", "✓ 生长激素·补", true));
       }
       if (inh) {
         var doneInh = isDone(date, "inh");
         tags.appendChild(mkTag(doneInh ? "done" : "inh", (doneInh ? "✓ " : "") + "抑制剂", doneInh));
+      } else if (extraInh) {
+        tags.appendChild(mkTag("extra", "✓ 抑制剂·补", true));
       }
       cell.appendChild(tags);
     }
@@ -745,17 +811,22 @@
     document.getElementById("sheetDate").textContent = cnDate(date);
     var gh = isGhDay(date), inh = isInhDay(date);
     document.getElementById("sheetSub").textContent =
-      (gh || inh) ? "点击标记是否已打" : "这一天无需打针";
+      (gh || inh) ? "点击标记是否已打；非规定日也可记录实际打针"
+                  : "这一天非规定用药日，如有实际打针可在下方记录";
 
     var box = document.getElementById("sheetMeds");
     box.innerHTML = "";
-    if (gh) box.appendChild(medRow("gh", "💉 生长激素", "每周" + WK[cfg.ghWeekday].slice(1) + "一次"));
-    if (inh) box.appendChild(medRow("inh", "💊 抑制剂", "每 " + cfg.inhInterval + " 天一次"));
-    if (!gh && !inh) {
-      var p = document.createElement("div");
-      p.className = "no-med";
-      p.textContent = "这一天没有安排用药。";
-      box.appendChild(p);
+    // 生长激素：规定日正常显示；非规定日作为「补打/额外」也可记录
+    if (gh) {
+      box.appendChild(medRow("gh", "💉 生长激素", "每周" + WK[cfg.ghWeekday].slice(1) + "一次", false));
+    } else {
+      box.appendChild(medRow("gh", "💉 生长激素", "非规定日 · 补打/额外记录", true));
+    }
+    // 抑制剂：规定日正常显示；非规定日作为「补打/额外」也可记录
+    if (inh) {
+      box.appendChild(medRow("inh", "💊 抑制剂", "每 " + cfg.inhInterval + " 天一次", false));
+    } else {
+      box.appendChild(medRow("inh", "💊 抑制剂", "非规定日 · 补打/额外记录", true));
     }
 
     var rec = getMeas(date);
@@ -766,7 +837,7 @@
 
     document.getElementById("mask").classList.add("show");
   }
-  function medRow(type, name, desc) {
+  function medRow(type, name, desc, isExtra) {
     var row = document.createElement("div");
     row.className = "med-row " + type;
     var left = document.createElement("div");
@@ -775,12 +846,12 @@
     var btn = document.createElement("button");
     var done = isDone(curSheetDate, type);
     btn.className = "toggle " + (done ? "on" : "off");
-    btn.textContent = done ? "已打 ✓" : "标记已打";
+    btn.textContent = done ? "已打 ✓" : (isExtra ? "记录实际打针" : "标记已打");
     btn.addEventListener("click", function () {
       var nowDone = !isDone(curSheetDate, type);
       setDone(curSheetDate, type, nowDone);
       btn.className = "toggle " + (nowDone ? "on" : "off");
-      btn.textContent = nowDone ? "已打 ✓" : "标记已打";
+      btn.textContent = nowDone ? "已打 ✓" : (isExtra ? "记录实际打针" : "标记已打");
       renderCalendar();
       renderReminder();
     });
@@ -892,10 +963,12 @@
     if (!hasAny) {
       canvas.style.display = "none";
       emptyEl.style.display = "block";
+      renderGrowthRate(all);
       return;
     }
     canvas.style.display = "block";
     emptyEl.style.display = "none";
+    renderGrowthRate(all);
 
     var dpr = window.devicePixelRatio || 1;
     var cssW = canvas.clientWidth || 480;
@@ -1002,6 +1075,89 @@
 
   function refreshAll() { renderReminder(); renderCalendar(); renderOverview(); renderChart(); }
 
+  // ---------- 生长速度：月增长 / 年化增长 ----------
+  // 按当前图表模式（身高/体重）计算：整体平均速度 + 最近两次速度。
+  // 身高优先用晨高(hm)，没有则用晚高(he)。
+  function grFmt(n) {
+    var r = Math.round(n * 100) / 100;
+    return (r > 0 ? "+" : "") + r;
+  }
+  function calcRate(pts) {
+    // pts: [{date, val}] 升序，返回 {perMonth, perYear, days, delta} 或 null
+    if (pts.length < 2) return null;
+    var a = pts[0], b = pts[pts.length - 1];
+    var days = dayDiff(a.date, b.date);
+    if (days <= 0) return null;
+    var delta = b.val - a.val;
+    return {
+      days: days,
+      delta: delta,
+      perMonth: delta / days * 30.4375,  // 平均每月天数
+      perYear: delta / days * 365.25
+    };
+  }
+  function renderGrowthRate(all) {
+    var box = document.getElementById("growthRate");
+    if (!box) return;
+
+    var unit, label, pts;
+    if (chartMode === "w") {
+      unit = "kg";
+      label = "体重";
+      pts = all.filter(function (r) { return r.w != null; })
+               .map(function (r) { return { date: r.date, val: r.w }; });
+    } else {
+      unit = "cm";
+      // 身高优先晨高，没有则用晚高
+      var hm = all.filter(function (r) { return r.hm != null; })
+                  .map(function (r) { return { date: r.date, val: r.hm }; });
+      if (hm.length >= 2) { pts = hm; label = "身高（晨高）"; }
+      else {
+        pts = all.filter(function (r) { return r.he != null; })
+                 .map(function (r) { return { date: r.date, val: r.he }; });
+        label = "身高（晚高）";
+      }
+    }
+
+    if (pts.length < 2) {
+      box.innerHTML = "<div class='gr-title'>📊 " +
+        (chartMode === "w" ? "体重" : "身高") + "增长速度</div>" +
+        "<div class='gr-empty'>至少需要 2 条记录才能计算增长速度。</div>";
+      return;
+    }
+
+    var overall = calcRate(pts);                 // 整体平均：首次→最新
+    var recent = calcRate(pts.slice(-2));        // 最近两次
+
+    var html = "<div class='gr-title'>📊 " + label + "增长速度（整体平均：" +
+      cnDateShort(pts[0].date) + " → " + cnDateShort(pts[pts.length - 1].date) +
+      "，共 " + overall.days + " 天）</div>";
+
+    html +=
+      "<div class='gr-row'>" +
+        "<div class='gr-box mon'>" +
+          "<div class='gr-label'>📅 月增长</div>" +
+          "<div class='gr-val'>" + grFmt(overall.perMonth) + " <small>" + unit + "/月</small></div>" +
+          "<div class='gr-sub'>期间共 " + grFmt(overall.delta) + unit + "</div>" +
+        "</div>" +
+        "<div class='gr-box yr'>" +
+          "<div class='gr-label'>📈 年化增长</div>" +
+          "<div class='gr-val'>" + grFmt(overall.perYear) + " <small>" + unit + "/年</small></div>" +
+          "<div class='gr-sub'>按当前速度推算</div>" +
+        "</div>" +
+      "</div>";
+
+    if (recent) {
+      html += "<div class='gr-recent'>最近两次（" +
+        cnDateShort(pts[pts.length - 2].date) + " → " + cnDateShort(pts[pts.length - 1].date) +
+        "，" + recent.days + " 天）：变化 <b>" + grFmt(recent.delta) + unit +
+        "</b> · 折合 <b>" + grFmt(recent.perMonth) + unit + "/月</b> · <b>" +
+        grFmt(recent.perYear) + unit + "/年</b></div>";
+    }
+
+    box.innerHTML = html;
+  }
+
   // ---------- 数据备份：导出 / 导入 ----------
   function flashBackup(msg, ok) {
     var t = document.getElementById("backupTip");
@@ -1041,7 +1197,7 @@
       }
       if (!confirm("导入将用备份数据覆盖当前所有记录，确定继续吗？\n（建议先导出当前数据备份）")) return;
       if (data.cfg && typeof data.cfg === "object") { cfg = Object.assign({}, DEFAULTS, data.cfg); saveCfg(cfg); }
-      if (data.log && typeof data.log === "object") { log = data.log; saveLog(log); }
+      if (data.log && typeof data.log === "object") { log = data.log; invalidateInhCache(); saveLog(log); }
       if (data.meas && typeof data.meas === "object") { meas = data.meas; saveMeas(meas); }
       fillSettings();
       refreshAll();
